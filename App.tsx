@@ -12,6 +12,8 @@ import { enqueue as enqueueSyncTask, init as initSyncService, registerCallbacks 
 import { addExerciseToLibrary } from './services/exerciseLibraryService';
 import { hasLocalData } from './services/migrationService';
 import MigrationDialog from './components/MigrationDialog';
+import { getStatusLabel, getStatusProgress } from './services/deepAnalysisService';
+import type { AnalysisJobStatus } from './services/deepAnalysisService';
 
 const App: React.FC = () => {
   const { user } = useAuth();
@@ -921,6 +923,53 @@ const App: React.FC = () => {
                 <video ref={videoPlayerRef} src={selectedSession.videoUrl} controls className="w-full h-full object-contain" />
               </div>
 
+              {/* Phase 2 Progress Banner */}
+              {(['specialists_running', 'consensus_running', 'report_generating'] as AnalysisJobStatus[]).includes(selectedSession.analysisStatus as AnalysisJobStatus) && (
+                <div className="bg-gradient-to-r from-brand-50 to-violet-50 border border-brand-100 rounded-[32px] p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-brand-100 flex items-center justify-center">
+                        <svg className="w-4 h-4 text-brand-600 animate-spin" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-black text-brand-600 uppercase tracking-widest">Deep Analysis Running</p>
+                        <p className="text-sm font-semibold text-slate-700">
+                          {getStatusLabel(selectedSession.analysisStatus as AnalysisJobStatus)}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-black text-brand-500 uppercase tracking-widest">
+                      {getStatusProgress(selectedSession.analysisStatus as AnalysisJobStatus)}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-brand-100 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-brand-500 to-violet-500 rounded-full transition-all duration-700"
+                      style={{ width: `${getStatusProgress(selectedSession.analysisStatus as AnalysisJobStatus)}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-500 font-medium">
+                    PT Expert, S&C Coach, and Audio Analyst are reviewing the session. Your coaching report will be ready shortly.
+                  </p>
+                </div>
+              )}
+
+              {/* Audio-not-used notice — shown after draft_ready if transcript is empty */}
+              {selectedSession.analysisStatus === 'draft_ready' && !selectedSession.analysis?.transcript && (
+                <div className="flex items-center gap-3 bg-slate-50 border border-slate-200 rounded-2xl px-5 py-3">
+                  <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
+                  </svg>
+                  <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                    Audio analysis skipped — background noise or music detected. Visual analysis only.
+                  </p>
+                </div>
+              )}
+
               {selectedSession.status === 'failed' ? (
                 <div className="bg-white rounded-[32px] p-12 border border-slate-200 shadow-sm text-center space-y-4">
                    <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto text-slate-400">
@@ -932,7 +981,7 @@ const App: React.FC = () => {
                    <p className="text-sm text-slate-500 font-medium max-w-md mx-auto">
                      Something went wrong during the analysis process. You can still watch the video, but coaching cues and rep counts are missing.
                    </p>
-                   <button 
+                   <button
                      onClick={() => handleRetryAnalysis(selectedSession)}
                      className="bg-brand-500 text-white px-8 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest shadow-lg shadow-brand-100 hover:bg-brand-600 transition-all"
                    >

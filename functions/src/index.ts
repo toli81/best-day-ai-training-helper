@@ -15,3 +15,13 @@ export { proxyGeminiAnalysis } from './ai/proxyGeminiAnalysis';
 
 // Library management (Phase 5)
 export { addToLibrary } from './library/addToLibrary';
+
+// Multi-Agent Analysis (Phase 1 — REP_COUNTER Gatekeeper)
+// Multi-Agent Analysis (Phase 2 — Specialists + Consensus + Report)
+export {
+  onVideoUploadedDeepAnalysis,
+  onAnalysisJobCreated,
+  triggerDeepAnalysis,
+  getExerciseIndex,
+  onRepCounterComplete,
+} from './agents/phase1Functions';

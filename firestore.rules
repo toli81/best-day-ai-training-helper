@@ -35,5 +35,23 @@ service cloud.firestore {
       allow update, delete: if isAuthenticated()
         && resource.data.addedBy == request.auth.uid;
     }
+
+    // ── Deep Analysis Jobs ─────────────────────────────────
+    match /analysisJobs/{jobId} {
+      allow read: if isAuthenticated()
+        && resource.data.trainerId == request.auth.uid;
+      allow write: if false;
+
+      match /agentResults/{agentId} {
+        allow read: if isAuthenticated()
+          && get(/databases/$(database)/documents/analysisJobs/$(jobId)).data.trainerId == request.auth.uid;
+        allow write: if false;
+      }
+    }
+
+    match /config/{configId} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
   }
 }

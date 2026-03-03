@@ -9,7 +9,7 @@ import * as admin from 'firebase-admin';
  * Path pattern: trainers/{trainerId}/sessions/{sessionId}/recording.{ext}
  */
 export const onVideoUploaded = functions.storage
-  .bucket(process.env.GCS_BUCKET || 'bestday-training-videos')
+  .bucket(process.env.GCS_BUCKET || 'best-day-training-app.firebasestorage.app')
   .object()
   .onFinalize(async (object) => {
     const filePath = object.name;

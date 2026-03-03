@@ -2,7 +2,7 @@ import * as functions from 'firebase-functions';
 import { Storage } from '@google-cloud/storage';
 
 const storage = new Storage();
-const BUCKET = process.env.GCS_BUCKET || 'bestday-training-videos';
+const BUCKET = process.env.GCS_BUCKET || 'best-day-training-app.firebasestorage.app';
 
 const ALLOWED_TYPES = ['video/webm', 'video/mp4', 'video/quicktime'];
 

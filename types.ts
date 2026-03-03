@@ -1,6 +1,17 @@
 
 export type SessionMode = 'clip' | 'workout30' | 'workout60';
 
+export type AnalysisJobStatus =
+  | 'pending'
+  | 'rep_counter_running'
+  | 'rep_counter_complete'
+  | 'specialists_running'
+  | 'consensus_running'
+  | 'report_generating'
+  | 'draft_ready'
+  | 'reviewed'
+  | 'failed';
+
 export interface Exercise {
   id: string;
   name: string;
@@ -47,6 +58,8 @@ export interface TrainingSession {
   error?: string;
   syncStatus?: SyncStatus;
   videoPath?: string; // GCS path
+  analysisJobId?: string;
+  analysisStatus?: AnalysisJobStatus;
   driveSync?: {
     status: 'synced' | 'pending' | 'failed';
     folderLink?: string;
