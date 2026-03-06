@@ -16,6 +16,16 @@ interface RecorderProps {
   onRecordingStateChange?: (isRecording: boolean) => void;
 }
 
+/** Race a promise against a timeout — rejects with a descriptive error on timeout */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms)
+    ),
+  ]);
+}
+
 const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingStateChange }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -35,11 +45,19 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
   const [snapshots, setSnapshots] = useState<string[]>([]);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
   const [isSwitchingLens, setIsSwitchingLens] = useState(false);
+  const [cameraStartingSlow, setCameraStartingSlow] = useState(false);
 
   // Camera lens selection state
   const [availableCameras, setAvailableCameras] = useState<CameraDevice[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
   const camerasEnumeratedRef = useRef(false);
+
+  // Microphone selection state
+  const [availableMics, setAvailableMics] = useState<MediaDeviceInfo[]>([]);
+  const [selectedMicId, setSelectedMicId] = useState<string | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioAnimFrameRef = useRef<number>(0);
 
   // Keep streamRef in sync with state for cleanup
   useEffect(() => {
@@ -55,6 +73,47 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
       onRecordingStateChange?.(false);
     };
   }, [onRecordingStateChange]);
+
+  // Audio level meter — monitors mic input when stream is active
+  useEffect(() => {
+    if (!stream) {
+      setAudioLevel(0);
+      return;
+    }
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack) {
+      setAudioLevel(0);
+      return;
+    }
+
+    let ctx: AudioContext;
+    try {
+      ctx = new AudioContext();
+    } catch {
+      return;
+    }
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    const source = ctx.createMediaStreamSource(stream);
+    source.connect(analyser);
+    audioContextRef.current = ctx;
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    const updateLevel = () => {
+      analyser.getByteFrequencyData(dataArray);
+      const avg = dataArray.reduce((sum, v) => sum + v, 0) / dataArray.length;
+      setAudioLevel(avg / 255); // normalize to 0–1
+      audioAnimFrameRef.current = requestAnimationFrame(updateLevel);
+    };
+    updateLevel();
+
+    return () => {
+      cancelAnimationFrame(audioAnimFrameRef.current);
+      source.disconnect();
+      ctx.close().catch(() => {});
+      audioContextRef.current = null;
+    };
+  }, [stream]);
 
   const captureSnapshot = useCallback(() => {
     if (!videoRef.current || !recording) return;
@@ -112,6 +171,12 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
     }
   }, [stream]);
 
+  // Build audio constraint based on selected mic
+  const getAudioConstraint = useCallback((): MediaTrackConstraints | boolean => {
+    if (selectedMicId) return { deviceId: { exact: selectedMicId } };
+    return true;
+  }, [selectedMicId]);
+
   // Classify a camera device by its label
   const classifyByLabel = (label: string): CameraKind => {
     const l = label.toLowerCase();
@@ -146,10 +211,13 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
       // If still unknown or needs verification, probe capabilities via temporary stream
       if ((camera.kind === 'unknown' || camera.kind === 'wide') && device.label) {
         try {
-          const tempStream = await navigator.mediaDevices.getUserMedia({
-            video: { deviceId: { ideal: device.deviceId } },
-            audio: false,
-          });
+          const tempStream = await withTimeout(
+            navigator.mediaDevices.getUserMedia({
+              video: { deviceId: { ideal: device.deviceId } },
+              audio: false,
+            }),
+            5000, 'Camera probe'
+          );
           const track = tempStream.getVideoTracks()[0];
           if (track && typeof track.getCapabilities === 'function') {
             const caps = track.getCapabilities() as any;
@@ -236,6 +304,10 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
     isStartingRef.current = true;
     startingTimestampRef.current = Date.now();
     setError(null);
+    setCameraStartingSlow(false);
+
+    // Show "Camera starting..." after 5 seconds if still not ready
+    const slowTimer = setTimeout(() => setCameraStartingSlow(true), 5000);
 
     // If we already have a stream, this is a lens/camera switch — show switching indicator
     const isSwitch = !!streamRef.current;
@@ -269,16 +341,23 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
         height: { ideal: 720 }
       };
 
+      const audioConstraint = getAudioConstraint();
       let s: MediaStream | null = null;
 
       // When a specific device is requested, try exact first (so we get the right lens)
       if (exactDeviceConstraints) {
         try {
-          s = await navigator.mediaDevices.getUserMedia({ video: exactDeviceConstraints, audio: true });
+          s = await withTimeout(
+            navigator.mediaDevices.getUserMedia({ video: exactDeviceConstraints, audio: audioConstraint }),
+            8000, 'Camera access'
+          );
         } catch (e1: any) {
           console.warn("Exact deviceId + audio failed, trying without audio...", e1);
           try {
-            s = await navigator.mediaDevices.getUserMedia({ video: exactDeviceConstraints, audio: false });
+            s = await withTimeout(
+              navigator.mediaDevices.getUserMedia({ video: exactDeviceConstraints, audio: false }),
+              8000, 'Camera access'
+            );
           } catch (e2: any) {
             console.warn("Exact deviceId failed entirely, falling back to facingMode...", e2);
             s = null; // Will fall through to facingMode fallback below
@@ -289,16 +368,25 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
       // If no device requested OR exact deviceId failed, use facingMode
       if (!s) {
         try {
-          s = await navigator.mediaDevices.getUserMedia({ video: facingConstraints, audio: true });
+          s = await withTimeout(
+            navigator.mediaDevices.getUserMedia({ video: facingConstraints, audio: audioConstraint }),
+            8000, 'Camera access'
+          );
         } catch (e3: any) {
           console.warn("FacingMode + audio failed, trying without audio...", e3);
           try {
-            s = await navigator.mediaDevices.getUserMedia({ video: facingConstraints, audio: false });
+            s = await withTimeout(
+              navigator.mediaDevices.getUserMedia({ video: facingConstraints, audio: false }),
+              8000, 'Camera access'
+            );
             setError("Microphone access denied. Recording video only.");
           } catch (e4: any) {
             console.warn("FacingMode failed, trying absolute fallback...", e4);
             try {
-              s = await navigator.mediaDevices.getUserMedia({ video: true });
+              s = await withTimeout(
+                navigator.mediaDevices.getUserMedia({ video: true }),
+                8000, 'Camera access'
+              );
             } catch (e5: any) {
               console.error("All camera attempts failed:", e5);
               throw e5;
@@ -321,6 +409,23 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
         setSelectedCameraId(deviceId);
       }
 
+      // Enumerate audio devices after first successful stream
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const mics = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+        setAvailableMics(mics);
+        // Detect which mic we actually got
+        const audioTrack = s.getAudioTracks()[0];
+        if (audioTrack) {
+          const audioSettings = audioTrack.getSettings();
+          if (audioSettings.deviceId && !selectedMicId) {
+            setSelectedMicId(audioSettings.deviceId);
+          }
+        }
+      } catch (e) {
+        console.warn('Audio device enumeration failed:', e);
+      }
+
       // After first successful camera access, enumerate and classify all cameras
       if (!camerasEnumeratedRef.current) {
         camerasEnumeratedRef.current = true;
@@ -335,6 +440,8 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
               // Re-start with the ultra-wide camera (must reset flag first)
               isStartingRef.current = false;
               setIsSwitchingLens(false);
+              clearTimeout(slowTimer);
+              setCameraStartingSlow(false);
               await startCamera('environment', ultrawide.deviceId);
               return;
             }
@@ -356,6 +463,8 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
         setError("Camera is currently locked by another app. Please close other apps and try again.");
       } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
         setError("Camera permission denied. Please allow camera access in your browser settings.");
+      } else if (err.message?.includes('timed out')) {
+        setError("Camera took too long to start. Please close other apps and try again.");
       } else {
         const errorMsg = err.message || (typeof err === 'string' ? err : JSON.stringify(err)) || "Unknown error";
         setError("Could not start camera. " + errorMsg);
@@ -363,6 +472,8 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
     } finally {
       isStartingRef.current = false;
       setIsSwitchingLens(false);
+      clearTimeout(slowTimer);
+      setCameraStartingSlow(false);
     }
   };
 
@@ -388,23 +499,37 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
     }
   };
 
+  // Handle mic change from dropdown
+  const handleMicChange = useCallback((micId: string) => {
+    setSelectedMicId(micId);
+    // Restart stream with new mic — need to re-acquire getUserMedia
+    if (streamRef.current) {
+      const currentFacing = facingMode;
+      const currentCameraId = selectedCameraId;
+      // Small delay to let React state update
+      setTimeout(() => {
+        startCamera(currentFacing, currentCameraId || undefined);
+      }, 100);
+    }
+  }, [facingMode, selectedCameraId]);
+
   const startRecording = useCallback(() => {
     if (!stream) return;
     setChunks([]);
     setSnapshots([]);
     setTimer(0);
-    
+
     // Fallback for Safari/Mobile support
     const mimeType = [
-      'video/webm;codecs=vp8,opus', 
-      'video/mp4', 
+      'video/webm;codecs=vp8,opus',
+      'video/mp4',
       'video/webm'
     ].find(t => MediaRecorder.isTypeSupported(t)) || '';
-    
-    const bitrate = mode === 'clip' ? 400000 : 250000; 
-    
+
+    const bitrate = mode === 'clip' ? 400000 : 250000;
+
     try {
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate }); 
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
       recorder.ondataavailable = (e) => { if (e.data.size > 0) setChunks(p => [...p, e.data]); };
       recorder.start(1000);
       mediaRecorderRef.current = recorder;
@@ -514,8 +639,19 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
           </div>
         )}
 
+        {/* Camera starting slow indicator */}
+        {cameraStartingSlow && !stream && !error && (
+          <div className="absolute inset-0 flex items-center justify-center z-10">
+            <div className="text-center space-y-2">
+              <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto" />
+              <p className="text-white text-xs font-bold">Starting camera...</p>
+              <p className="text-slate-500 text-[10px]">This may take a moment</p>
+            </div>
+          </div>
+        )}
+
         {/* Activate camera placeholder — only when no stream and not switching */}
-        {!stream && !isSwitchingLens && (
+        {!stream && !isSwitchingLens && !cameraStartingSlow && (
           <div className="z-10 text-center space-y-4 p-8">
             <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse">
               <svg className="w-8 h-8 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -545,7 +681,7 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
             </button>
           </div>
         )}
-        
+
         {/* Camera flip button (front/back toggle) */}
         {!recording && stream && (
           <button
@@ -603,7 +739,7 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
             </button>
           </>
         )}
-        
+
         {error && (
           <div className="absolute inset-0 flex items-center justify-center bg-slate-900/95 p-10 text-center z-30">
             <div className="space-y-6 max-w-sm">
@@ -623,14 +759,15 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
                   onClick={() => {
                     setError(null);
                     setSelectedCameraId(null);
+                    camerasEnumeratedRef.current = false;
                     // Fresh start — don't re-use failed deviceId
                     startCamera(facingMode);
                   }}
                   className="w-full bg-brand-500 text-white px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-brand-400"
                 >
-                  Retry Connection
+                  Retry Camera
                 </button>
-                <button 
+                <button
                     onClick={() => setError(null)}
                     className="w-full bg-slate-800 text-slate-400 px-6 py-3 rounded-xl font-black text-[10px] uppercase tracking-widest hover:text-white"
                 >
@@ -645,6 +782,52 @@ const Recorder: React.FC<RecorderProps> = ({ onSessionComplete, onRecordingState
       {/* Controls below video — hidden during recording for full-screen camera view */}
       {!recording ? (
         <div className="p-6 space-y-6">
+          {/* Mic selector + Audio level meter */}
+          {stream && (
+            <div className="space-y-3">
+              {availableMics.length > 1 && (
+                <div className="flex items-center gap-3">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest whitespace-nowrap">
+                    <svg className="w-4 h-4 inline-block mr-1 -mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                    </svg>
+                    Mic
+                  </label>
+                  <select
+                    value={selectedMicId || ''}
+                    onChange={(e) => handleMicChange(e.target.value)}
+                    className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-xs font-medium outline-none focus:ring-2 focus:ring-brand-100 bg-white truncate"
+                  >
+                    {availableMics.map((mic, i) => (
+                      <option key={mic.deviceId} value={mic.deviceId}>
+                        {mic.label || `Microphone ${i + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {/* Audio level bar */}
+              <div className="flex items-center gap-2">
+                <svg className="w-4 h-4 text-slate-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+                <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-75 ${
+                      audioLevel > 0.6 ? 'bg-gradient-to-r from-green-400 to-yellow-400' :
+                      audioLevel > 0.02 ? 'bg-gradient-to-r from-green-400 to-green-500' :
+                      'bg-slate-200'
+                    }`}
+                    style={{ width: `${Math.min(100, audioLevel * 200)}%` }}
+                  />
+                </div>
+                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest w-12 text-right">
+                  {audioLevel > 0.02 ? 'Live' : 'Silent'}
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-3">
             {[
               { id: 'clip', label: 'Clip', desc: '< 5 mins' },

@@ -1,11 +1,13 @@
 import {
   collection,
+  doc,
   query,
   where,
   orderBy,
   limit,
   getDocs,
   onSnapshot,
+  updateDoc,
   type Unsubscribe,
 } from 'firebase/firestore';
 import { getFunctions, httpsCallable } from 'firebase/functions';
@@ -84,13 +86,17 @@ export function subscribeLibrary(
 // --- Thumbnail capture ---
 
 /**
- * Capture a single video frame as a base64 JPEG thumbnail.
- * Creates a hidden video element, seeks to the given time, and draws to canvas.
+ * Internal: Capture a single video frame as a base64 JPEG thumbnail.
+ * @param useCrossOrigin — set true for non-blob URLs (needed for canvas read on CORS-enabled servers)
  */
-export function captureVideoFrame(videoUrl: string, timeSeconds: number): Promise<string> {
+function captureVideoFrameInternal(
+  videoUrl: string,
+  timeSeconds: number,
+  useCrossOrigin: boolean
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
-    video.crossOrigin = 'anonymous';
+    if (useCrossOrigin) video.crossOrigin = 'anonymous';
     video.preload = 'metadata';
     video.muted = true;
     video.playsInline = true;
@@ -128,11 +134,41 @@ export function captureVideoFrame(videoUrl: string, timeSeconds: number): Promis
       }
     });
 
-    // Timeout safety
-    setTimeout(() => { cleanup(); reject(new Error('Thumbnail capture timed out')); }, 10000);
+    // Timeout safety (15s)
+    setTimeout(() => { cleanup(); reject(new Error('Thumbnail capture timed out')); }, 15000);
 
     video.src = videoUrl;
   });
+}
+
+/**
+ * Capture a single video frame as a base64 JPEG thumbnail.
+ * Tries with crossOrigin for CORS-enabled URLs, falls back without for blob URLs or CORS failures.
+ */
+export async function captureVideoFrame(videoUrl: string, timeSeconds: number): Promise<string> {
+  const isBlobUrl = videoUrl.startsWith('blob:');
+
+  if (isBlobUrl) {
+    // Blob URLs don't need crossOrigin
+    return captureVideoFrameInternal(videoUrl, timeSeconds, false);
+  }
+
+  // For HTTP URLs: try with crossOrigin first, fallback without
+  try {
+    return await captureVideoFrameInternal(videoUrl, timeSeconds, true);
+  } catch (e) {
+    console.warn('Thumbnail capture failed with crossOrigin, retrying without:', e);
+    return captureVideoFrameInternal(videoUrl, timeSeconds, false);
+  }
+}
+
+/** Update thumbnail for an existing library exercise */
+export async function updateExerciseThumbnail(
+  libraryExerciseId: string,
+  thumbnailBase64: string
+): Promise<void> {
+  const ref = doc(db, 'exerciseLibrary', libraryExerciseId);
+  await updateDoc(ref, { thumbnailBase64 });
 }
 
 // --- Add to library ---

@@ -1,7 +1,8 @@
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { TrainingSession, Exercise, LibraryExercise } from '../types';
 import { subscribeLibrary, addExerciseToLibrary, captureVideoFrame } from '../services/exerciseLibraryService';
+import { getSignedDownloadUrl } from '../services/gcsService';
 
 type LibraryTab = 'my-exercises' | 'shared-library';
 
@@ -42,7 +43,9 @@ const ExerciseLibrary: React.FC<ExerciseLibraryProps> = ({
 
   // Clip playback modal
   const [activeClip, setActiveClip] = useState<{ videoUrl: string; startTime: number; endTime: number; name: string } | null>(null);
+  const [clipLoading, setClipLoading] = useState(false);
   const clipVideoRef = React.useRef<HTMLVideoElement>(null);
+  const signedUrlCache = useRef<Record<string, string>>({});
 
   // Subscribe to shared library when tab is active
   useEffect(() => {
@@ -148,10 +151,30 @@ const ExerciseLibrary: React.FC<ExerciseLibraryProps> = ({
     }
   }, [sessions]);
 
-  // --- Clip playback ---
-  const handlePlayClip = useCallback((videoUrl: string, startTime: number, endTime: number, name: string) => {
-    setActiveClip({ videoUrl, startTime, endTime, name });
+  // --- Clip playback (resolves GCS paths to signed URLs) ---
+  const resolveVideoUrl = useCallback(async (urlOrPath: string): Promise<string> => {
+    // Already a playable URL
+    if (urlOrPath.startsWith('http') || urlOrPath.startsWith('blob:')) return urlOrPath;
+    // Check cache
+    if (signedUrlCache.current[urlOrPath]) return signedUrlCache.current[urlOrPath];
+    // Resolve GCS path to signed URL
+    const signedUrl = await getSignedDownloadUrl(urlOrPath);
+    signedUrlCache.current[urlOrPath] = signedUrl;
+    return signedUrl;
   }, []);
+
+  const handlePlayClip = useCallback(async (videoUrlOrPath: string, startTime: number, endTime: number, name: string) => {
+    setClipLoading(true);
+    try {
+      const videoUrl = await resolveVideoUrl(videoUrlOrPath);
+      setActiveClip({ videoUrl, startTime, endTime, name });
+    } catch (err) {
+      console.error('Failed to get signed URL for clip:', err);
+      alert('Could not load video. The video may not be available.');
+    } finally {
+      setClipLoading(false);
+    }
+  }, [resolveVideoUrl]);
 
   // Pause clip at endTime
   useEffect(() => {
@@ -431,10 +454,14 @@ const ExerciseLibrary: React.FC<ExerciseLibraryProps> = ({
                         </div>
                       </div>
                     ) : (
-                      <div className="aspect-video bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
+                      <div
+                        className="aspect-video bg-gradient-to-br from-slate-100 to-slate-200 flex flex-col items-center justify-center gap-2 cursor-pointer hover:from-slate-200 hover:to-slate-300 transition-colors"
+                        onClick={() => ex.videoPath && handlePlayClip(ex.videoPath, ex.startTime, ex.endTime, ex.name)}
+                      >
                         <svg className="w-10 h-10 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                         </svg>
+                        <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest">Tap to play</span>
                       </div>
                     )}
                     <div className="p-6 flex-grow space-y-4">
@@ -472,6 +499,17 @@ const ExerciseLibrary: React.FC<ExerciseLibraryProps> = ({
                       <span className="text-[9px] font-black text-slate-300 uppercase">
                         {new Date(ex.sessionDate).toLocaleDateString()}
                       </span>
+                      {ex.videoPath && (
+                        <button
+                          onClick={() => handlePlayClip(ex.videoPath, ex.startTime, ex.endTime, ex.name)}
+                          className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:text-brand-500 hover:bg-brand-50 transition-all"
+                        >
+                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                          </svg>
+                          Play Clip
+                        </button>
+                      )}
                       <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">
                         {Math.round((ex.endTime - ex.startTime))}s clip
                       </span>
@@ -489,6 +527,15 @@ const ExerciseLibrary: React.FC<ExerciseLibraryProps> = ({
             </>
           )}
         </>
+      )}
+      {/* Clip Loading Overlay */}
+      {clipLoading && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="text-center space-y-3">
+            <div className="w-10 h-10 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mx-auto" />
+            <p className="text-white text-xs font-black uppercase tracking-widest">Loading clip...</p>
+          </div>
+        </div>
       )}
       {/* Clip Playback Modal */}
       {activeClip && (

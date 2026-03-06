@@ -1,4 +1,5 @@
 import * as functions from 'firebase-functions';
+import * as admin from 'firebase-admin';
 import { Storage } from '@google-cloud/storage';
 
 const storage = new Storage();
@@ -19,8 +20,18 @@ export const getSignedUrl = functions.https.onCall(
     // Verify ownership: path must start with trainers/{uid}/ OR be a library clip
     const isOwnContent = path.startsWith(`trainers/${uid}/`);
     const isLibraryClip = path.startsWith('library/clips/');
+
     if (!isOwnContent && !isLibraryClip) {
-      throw new functions.https.HttpsError('permission-denied', 'Access denied to this file');
+      // Allow access if this video belongs to a shared library exercise
+      const db = admin.firestore();
+      const librarySnap = await db.collection('exerciseLibrary')
+        .where('videoPath', '==', path)
+        .limit(1)
+        .get();
+
+      if (librarySnap.empty) {
+        throw new functions.https.HttpsError('permission-denied', 'Access denied to this file');
+      }
     }
 
     const [url] = await storage
